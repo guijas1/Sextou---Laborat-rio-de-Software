@@ -5,6 +5,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv(BASE_DIR / ".env")
+
 # Recomenda-se definir DJANGO_SECRET_KEY no ambiente para evitar chaves curtas em dev
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-sextou-secret-key-change-me-2026-with-64chars")
 DEBUG = True
@@ -61,8 +65,10 @@ DATABASES = {
     }
 }
 
-# Permite o front (Vite) em dev acessar a API
-CORS_ALLOWED_ORIGINS = ["http://localhost:5173"]
+# Permite o front (Vite) em dev acessar a API.
+# Defina FRONTEND_URL no ambiente para apontar para outro host/porta (ex.: em produção).
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+CORS_ALLOWED_ORIGINS = [FRONTEND_URL]
 CORS_ALLOW_CREDENTIALS = True
 
 LANGUAGE_CODE = "pt-br"

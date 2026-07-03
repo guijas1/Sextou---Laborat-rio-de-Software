@@ -14,6 +14,7 @@ Backend da plataforma **Sextou**, para criação de eventos, organização por c
 | djangorestframework-simplejwt | 5.5.1 | autenticação via JWT |
 | django-cors-headers | 4.3.1 | liberação de CORS para o frontend |
 | Pillow | 10.3.0 | suporte a upload de imagem (`ImageField`) |
+| python-dotenv | 1.0.1 | carrega variáveis de `.env` automaticamente |
 | SQLite | - | banco de dados local (`db.sqlite3`) |
 
 ## Estrutura do projeto
@@ -52,16 +53,25 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-3. (Opcional, mas recomendado) defina uma `SECRET_KEY` segura no ambiente:
+3. Copie o arquivo de variáveis de ambiente e ajuste os valores:
 
 ```bash
-# Linux/Mac
-export DJANGO_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-# Windows PowerShell
-$env:DJANGO_SECRET_KEY = "<valor gerado>"
+cp .env.example .env
 ```
 
-Se a variável não for definida, o projeto usa uma chave fixa de desenvolvimento definida em `config/settings.py` — **não usar em produção**.
+```text
+# .env
+DJANGO_SECRET_KEY=
+FRONTEND_URL=http://localhost:5173
+```
+
+`config/settings.py` carrega esse arquivo automaticamente via `python-dotenv` (`load_dotenv(BASE_DIR / ".env")`). Se `DJANGO_SECRET_KEY` ficar em branco, o projeto usa uma chave fixa de desenvolvimento definida no próprio `config/settings.py` — **não usar em produção**. Para gerar uma chave segura:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+`FRONTEND_URL` define qual origem é liberada no CORS (ver seção [Configurações relevantes](#configurações-relevantes-configsettingspy)); se não for definida, o padrão é `http://localhost:5173` (porta padrão do Vite).
 
 4. Crie o banco de dados local e aplique as migrações (a migração de `categories` já popula categorias padrão: Festa, Show, Workshop, Esporte, Gastronomia, Tech & Talks):
 
@@ -86,7 +96,7 @@ A API fica disponível em `http://127.0.0.1:8000/`.
 ## Configurações relevantes (`config/settings.py`)
 
 - `DEBUG = True` e `ALLOWED_HOSTS = ["*"]` — configuração de desenvolvimento, não deve ir para produção assim.
-- `CORS_ALLOWED_ORIGINS = ["http://localhost:5173"]` com `CORS_ALLOW_CREDENTIALS = True` — liberado apenas para o frontend Vite rodando localmente. Qualquer outra origem precisa ser adicionada aqui.
+- `CORS_ALLOWED_ORIGINS = [FRONTEND_URL]` com `CORS_ALLOW_CREDENTIALS = True` — `FRONTEND_URL` vem da variável de ambiente (`.env`), com padrão `http://localhost:5173` (porta padrão do Vite) se não for definida. Para liberar outra origem (ex.: deploy do frontend), basta ajustar `FRONTEND_URL` no `.env` — hoje só é possível uma origem por vez, já que a lista sempre tem um único item.
 - `TIME_ZONE = "America/Sao_Paulo"`, `USE_TZ = True` — datas são armazenadas em UTC e convertidas; ao enviar `data_hora`, inclua o offset (ex.: `-03:00`).
 - `DEFAULT_PAGINATION_CLASS` = `PageNumberPagination` com `PAGE_SIZE = 10` — todas as views de listagem baseadas em `generics.ListAPIView`/`ModelViewSet.list` são paginadas (ver seção [Paginação](#paginação)).
 - `LOGGING` configurado para exibir no console mensagens `DEBUG` de `rest_framework` e `rest_framework_simplejwt`, além de `INFO` do Django — útil para depurar problemas de autenticação.
