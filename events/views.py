@@ -1,20 +1,28 @@
 import logging
-from rest_framework import viewsets, status
+
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
+
 from .models import Event
-from .serializers import EventSerializer
 from .permissions import IsOrganizerOrReadOnly
+from .serializers import CommentSerializer, EventSerializer
+from .services import (
+    cancelar_inscricao,
+    criar_comentario,
+    inscrever_usuario,
+    listar_comentarios,
+)
 
 logger = logging.getLogger(__name__)
-from registrations.models import Registration 
 
-# ViewSet principal que agrupa toda a lógica de negócio do módulo de eventos
+
 class EventViewSet(viewsets.ModelViewSet):
-    queryset = Event.objects.all()
+    queryset = Event.objects.select_related("organizador", "categoria").prefetch_related(
+        "comentarios__autor",
+    )
     serializer_class = EventSerializer
-    # Permite leitura para visitantes, mas exige token JWT válido para criar, editar ou deletar eventos
     permission_classes = [IsAuthenticatedOrReadOnly, IsOrganizerOrReadOnly]
 
     def perform_create(self, serializer):
@@ -24,89 +32,61 @@ class EventViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
             logger.warning("Event create validation failed: %s", serializer.errors)
-            return Response({"detail": "Não foi possível criar o evento.", "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "Nao foi possivel criar o evento.", "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         self.perform_create(serializer)
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', False)
+        partial = kwargs.pop("partial", False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         if not serializer.is_valid():
             logger.warning("Event update validation failed: %s", serializer.errors)
-            return Response({"detail": "Não foi possível atualizar o evento.", "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "Nao foi possivel atualizar o evento.", "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         self.perform_update(serializer)
         return Response(serializer.data)
 
-    # Endpoint customizado para processar as inscrições dos usuários
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    @action(detail=True, methods=["get"])
+    def vacancies(self, request, pk=None):
+        evento = self.get_object()
+        return Response({"vagas_disponiveis": evento.vagas_disponiveis})
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
     def register(self, request, pk=None):
-        evento_atual = self.get_object() 
-        usuario_atual = request.user
+        evento = self.get_object()
+        inscrever_usuario(evento, request.user)
+        return Response({"mensagem": "Inscricao confirmada!"}, status=status.HTTP_201_CREATED)
 
-        # Validação de segurança para impedir duplicidade de inscrições
-        if Registration.objects.filter(evento=evento_atual, usuario=usuario_atual).exists():
-            return Response(
-                {"erro": "Você já está inscrito neste evento."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Checagem final de disponibilidade de vagas antes de autorizar a inscrição no banco
-        inscritos_atuais = Registration.objects.filter(evento=evento_atual).count()
-        if inscritos_atuais >= evento_atual.capacidade_maxima:
-            return Response(
-                {"erro": "Poxa, este evento já está lotado!"}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        Registration.objects.create(evento=evento_atual, usuario=usuario_atual)
-        return Response({"mensagem": "Inscrição confirmada!"}, status=status.HTTP_201_CREATED)
-
-    # Endpoint customizado para revogar a inscrição do usuário logado
-    @action(detail=True, methods=['delete'], permission_classes=[IsAuthenticated])
+    @action(detail=True, methods=["delete"], permission_classes=[IsAuthenticated])
     def cancel(self, request, pk=None):
-        evento_atual = self.get_object()
-        usuario_atual = request.user
-
-        inscricao = Registration.objects.filter(evento=evento_atual, usuario=usuario_atual).first()
-        
-        if not inscricao:
-            return Response(
-                {"erro": "Você não possui inscrição neste evento."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        inscricao.delete()
-        # Retorna status 204 (No Content) pois não há dados para devolver à view após o delete
+        evento = self.get_object()
+        cancelar_inscricao(evento, request.user)
         return Response(status=status.HTTP_204_NO_CONTENT)
-    
-    # Endpoint específico para processar submissões do formulário de comentários no frontend
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+
+    @action(
+        detail=True,
+        methods=["get", "post"],
+        permission_classes=[IsAuthenticatedOrReadOnly],
+    )
     def comments(self, request, pk=None):
-        evento_atual = self.get_object()
-        usuario_atual = request.user
-        
-        texto_comentario = request.data.get('texto')
+        evento = self.get_object()
 
-        # Valida se o body da requisição possui conteúdo real antes de gravar
-        if not texto_comentario:
-            return Response(
-                {"erro": "O comentário não pode estar vazio."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        if request.method == "GET":
+            serializer = CommentSerializer(listar_comentarios(evento), many=True)
+            return Response(serializer.data)
 
-        from .models import Comment 
-        
-        novo_comentario = Comment.objects.create(
-            evento=evento_atual, 
-            autor=usuario_atual, 
-            texto=texto_comentario
+        comentario = criar_comentario(
+            evento=evento,
+            autor=request.user,
+            texto=request.data.get("texto"),
         )
-
-        # Retorna os dados inseridos de forma instantânea e formatada para o estado do React ser atualizado
-        return Response({
-            "id": novo_comentario.id,
-            "autor": usuario_atual.username, 
-            "texto": novo_comentario.texto
-        }, status=status.HTTP_201_CREATED)
+        return Response(CommentSerializer(comentario).data, status=status.HTTP_201_CREATED)
