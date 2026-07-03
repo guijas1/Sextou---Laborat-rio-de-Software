@@ -1,433 +1,455 @@
+# Sextou - Backend em Django
 
-# EventoFacil - Backend em Django
+Backend da plataforma **Sextou**, para criação de eventos, organização por categorias, inscrição de usuários e comentários. É um projeto 100% API (JSON), sem telas HTML — o frontend (React/Vite) consome os endpoints separadamente.
 
-Este projeto é o backend do **EventoFacil**, uma plataforma para criar eventos, organizar categorias, permitir inscrições de usuários e registrar comentários.
+> Este README foi atualizado a partir da leitura completa do código-fonte atual (`config`, `accounts`, `categories`, `events`, `registrations`). Ele substitui a versão anterior, que descrevia um fluxo de autenticação por sessão que não existe mais no código.
 
-O foco deste repositório é apenas o backend. Não há telas HTML nem frontend. A comunicação acontece por endpoints JSON, ou seja, o sistema recebe dados em JSON e responde em JSON.
+## Stack tecnológica
+
+| Componente | Versão | Uso |
+| --- | --- | --- |
+| Python | 3.12 | linguagem |
+| Django | 5.0.6 | framework web |
+| djangorestframework | 3.15.1 | camada de API REST |
+| djangorestframework-simplejwt | 5.5.1 | autenticação via JWT |
+| django-cors-headers | 4.3.1 | liberação de CORS para o frontend |
+| Pillow | 10.3.0 | suporte a upload de imagem (`ImageField`) |
+| SQLite | - | banco de dados local (`db.sqlite3`) |
+
+## Estrutura do projeto
+
+```text
+config/          Settings, roteamento raiz e tratamento global de exceções da API.
+accounts/        Cadastro de usuário, login/refresh JWT e dados do usuário logado.
+categories/      Categorias usadas para classificar eventos (somente leitura via API).
+events/          Eventos, comentários, vagas, inscrição/cancelamento (via ações do ViewSet).
+registrations/   Listagem das inscrições do usuário logado.
+```
+
+Convenções internas:
+
+- `views.py` — recebe a requisição HTTP, aplica permissões e chama serializer/service.
+- `serializers.py` — validação e formatação de entrada/saída (equivalente a DTOs).
+- `services.py` (em `events`) — regra de negócio isolada da view, para facilitar testes.
+- `permissions.py` (em `events`) — regras de autorização por objeto.
+- `migrations/` — evolução do schema do banco.
 
 ## Como rodar o projeto
 
-1. Instale as dependências:
+1. Crie e ative um ambiente virtual (opcional, mas recomendado):
+
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# Linux/Mac
+source .venv/bin/activate
+```
+
+2. Instale as dependências:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Crie o banco de dados local:
+3. (Opcional, mas recomendado) defina uma `SECRET_KEY` segura no ambiente:
+
+```bash
+# Linux/Mac
+export DJANGO_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+# Windows PowerShell
+$env:DJANGO_SECRET_KEY = "<valor gerado>"
+```
+
+Se a variável não for definida, o projeto usa uma chave fixa de desenvolvimento definida em `config/settings.py` — **não usar em produção**.
+
+4. Crie o banco de dados local e aplique as migrações (a migração de `categories` já popula categorias padrão: Festa, Show, Workshop, Esporte, Gastronomia, Tech & Talks):
 
 ```bash
 python manage.py migrate
 ```
 
-3. Rode os testes:
+5. (Opcional) crie um superusuário para acessar o `/admin/`:
 
 ```bash
-python manage.py test
+python manage.py createsuperuser
 ```
 
-4. Inicie o servidor:
+6. Inicie o servidor:
 
 ```bash
 python manage.py runserver
 ```
 
-Depois disso, a API fica disponível em `http://127.0.0.1:8000/`.
+A API fica disponível em `http://127.0.0.1:8000/`.
 
-## Estrutura do projeto
+## Configurações relevantes (`config/settings.py`)
 
-```text
-config/          Configurações gerais do Django e rotas principais.
-accounts/        Cadastro, login, logout e dados do usuário logado.
-categories/      Categorias usadas para classificar eventos.
-events/          Eventos, comentários, regras de criação e listagem.
-registrations/   Inscrições e cancelamentos de inscrições.
-```
+- `DEBUG = True` e `ALLOWED_HOSTS = ["*"]` — configuração de desenvolvimento, não deve ir para produção assim.
+- `CORS_ALLOWED_ORIGINS = ["http://localhost:5173"]` com `CORS_ALLOW_CREDENTIALS = True` — liberado apenas para o frontend Vite rodando localmente. Qualquer outra origem precisa ser adicionada aqui.
+- `TIME_ZONE = "America/Sao_Paulo"`, `USE_TZ = True` — datas são armazenadas em UTC e convertidas; ao enviar `data_hora`, inclua o offset (ex.: `-03:00`).
+- `DEFAULT_PAGINATION_CLASS` = `PageNumberPagination` com `PAGE_SIZE = 10` — todas as views de listagem baseadas em `generics.ListAPIView`/`ModelViewSet.list` são paginadas (ver seção [Paginação](#paginação)).
+- `LOGGING` configurado para exibir no console mensagens `DEBUG` de `rest_framework` e `rest_framework_simplejwt`, além de `INFO` do Django — útil para depurar problemas de autenticação.
+- Uploads de imagem (`imagem_capa` de `Event`) vão para `media/capas/`, servidos via `MEDIA_URL = "media/"`.
 
-## Visão abrangente: o que cada parte faz
+## Autenticação
 
-Esta seção explica o projeto sem exigir conhecimento técnico profundo.
+O projeto usa **JWT** via `djangorestframework-simplejwt`. Não existe mais autenticação por sessão/cookie nem endpoint de logout no backend — o token é stateless (não há `token_blacklist` instalado), então "logout" é responsabilidade do frontend (descartar o token salvo).
 
-### `accounts`
+Fluxo:
 
-Responsável pelas contas de usuário.
+1. `POST /accounts/register/` — cria o usuário.
+2. `POST /accounts/login/` — autentica e devolve um par de tokens (`access` e `refresh`).
+3. Nas próximas requisições autenticadas, envie o header:
 
-Ele permite criar uma conta, fazer login, fazer logout e consultar quem é o usuário atualmente autenticado.
+   ```http
+   Authorization: Bearer <access_token>
+   ```
 
-### `categories`
+4. Quando o `access` expirar, use `POST /accounts/token/refresh/` enviando o `refresh` para obter um novo `access`.
 
-Responsável por organizar eventos em grupos.
+O `access_token` e o `refresh_token` usam a duração padrão do SimpleJWT (não há bloco `SIMPLE_JWT` customizado em `settings.py`): access token válido por 5 minutos, refresh token por 1 dia, sem rotação automática.
 
-Exemplos de categorias: Workshop, Palestra, Show, Curso ou Tecnologia. Um evento sempre pertence a uma categoria.
+### Endpoints de conta
 
-### `events`
-
-Responsável pelo cadastro e consulta de eventos.
-
-Um evento possui título, descrição, data, local, capacidade máxima, categoria, organizador e status. Também é aqui que ficam os comentários dos usuários.
-
-### `registrations`
-
-Responsável pelas inscrições.
-
-Ele controla quem se inscreveu em qual evento, impede inscrição duplicada e verifica se ainda existem vagas disponíveis.
-
-### `services`
-
-Os arquivos chamados `services.py` guardam as regras importantes do sistema.
-
-Exemplo: a view recebe o pedido do usuário, mas quem decide se existe vaga ou se o organizador pode editar o evento é o service. Isso deixa o código mais fácil de testar e entender.
-
-## Visão técnica: endpoints da API
-
-### Saúde da aplicação
-
-| Método | Endpoint | O que faz                                     |
-| ------- | -------- | --------------------------------------------- |
-| GET     | `/`    | Confirma que a aplicação está respondendo. |
-
-### Contas
-
-| Método | Endpoint                    | O que faz                             |
-| ------- | --------------------------- | ------------------------------------- |
-| POST    | `/api/accounts/register/` | Cria um usuário.                     |
-| POST    | `/api/accounts/login/`    | Faz login e cria a sessão.           |
-| POST    | `/api/accounts/logout/`   | Encerra a sessão do usuário logado. |
-| GET     | `/api/accounts/me/`       | Retorna os dados do usuário logado.  |
+| Método | Endpoint | Autenticação | O que faz |
+| --- | --- | --- | --- |
+| POST | `/accounts/register/` | pública | Cria um usuário. |
+| POST | `/accounts/login/` | pública | Autentica e retorna `access`/`refresh`. |
+| POST | `/accounts/token/refresh/` | pública | Troca um `refresh` válido por um novo `access`. |
+| GET | `/accounts/me/` | obrigatória | Retorna dados do usuário logado. |
 
 Exemplo de cadastro:
 
 ```json
+POST /accounts/register/
 {
   "username": "maria",
   "email": "maria@example.com",
-  "password": "pass12345"
+  "password": "pass12345",
+  "first_name": "Maria"
 }
 ```
 
-### Como o login e o logout funcionam
-
-Este projeto usa **sessão do Django**. Não existe token JWT.
-
-1. O cliente envia usuário e senha para `POST /api/accounts/login/`.
-2. Se os dados estiverem corretos, o Django devolve um cookie chamado `sessionid`.
-3. O cliente precisa enviar esse mesmo cookie nas próximas requisições.
-4. Para sair, o cliente envia `POST /api/accounts/logout/` com o cookie `sessionid`.
-5. O Django apaga a sessão. Depois disso, endpoints protegidos voltam a responder com status `401`.
-
-No Postman, os cookies normalmente são armazenados e enviados automaticamente. Faça o login e o logout usando exatamente o mesmo endereço, por exemplo `127.0.0.1`. Não alterne entre `127.0.0.1` e `localhost`, pois os cookies são associados ao endereço usado.
-
-Requisição de logout:
-
-```http
-POST http://127.0.0.1:8000/api/accounts/logout/
-```
-
-O logout não precisa de corpo JSON. A resposta esperada é:
+Resposta (`201`):
 
 ```json
 {
-  "message": "Logout realizado com sucesso.",
-  "authenticated": false
+  "id": 1,
+  "username": "maria",
+  "email": "maria@example.com",
+  "first_name": "Maria",
+  "nome": "Maria"
 }
 ```
 
-Para confirmar, faça em seguida:
+> Validação própria em `UserRegisterSerializer.validate_email`: recusa (`400`) se já existir um usuário com o mesmo e-mail **ou** o mesmo username.
 
-```http
-GET http://127.0.0.1:8000/api/accounts/me/
+Exemplo de login:
+
+```json
+POST /accounts/login/
+{ "username": "maria", "password": "pass12345" }
 ```
 
-A resposta esperada após o logout é status `401`:
+Resposta (`200`):
 
 ```json
 {
-  "error": "Autenticacao obrigatoria."
+  "refresh": "eyJhbGciOi...",
+  "access": "eyJhbGciOi..."
 }
 ```
 
-Exemplo completo com `curl`, salvando e reutilizando o cookie:
+Exemplo de uso do token:
 
 ```bash
-curl -c cookies.txt -X POST http://127.0.0.1:8000/api/accounts/login/ \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"maria\",\"password\":\"pass12345\"}"
-
-curl -b cookies.txt -X POST http://127.0.0.1:8000/api/accounts/logout/
+curl http://127.0.0.1:8000/accounts/me/ \
+  -H "Authorization: Bearer eyJhbGciOi..."
 ```
+
+## Endpoints da API
+
+Todas as rotas abaixo (exceto `/accounts/...` e `/admin/`) ficam sob o prefixo `/api/`.
 
 ### Categorias
 
-| Método | Endpoint                  | O que faz                                       |
-| ------- | ------------------------- | ----------------------------------------------- |
-| GET     | `/api/categories/`      | Lista categorias ativas.                        |
-| POST    | `/api/categories/`      | Cria categoria. Apenas administradores.         |
-| GET     | `/api/categories/<id>/` | Mostra uma categoria específica.               |
-| PATCH   | `/api/categories/<id>/` | Edita uma categoria. Apenas administradores.    |
-| DELETE  | `/api/categories/<id>/` | Desativa uma categoria. Apenas administradores. |
+| Método | Endpoint | Autenticação | O que faz |
+| --- | --- | --- | --- |
+| GET | `/api/categories/` | pública | Lista todas as categorias (paginado). |
 
-Exemplo de criação:
+Não há endpoints de criação/edição/remoção de categoria pela API — isso só é feito pelo painel `/admin/`.
+
+Formato de item:
 
 ```json
-{
-  "name": "Workshop",
-  "description": "Eventos práticos com participação dos alunos"
-}
+{ "id": 1, "nome": "Workshop", "slug": "workshop" }
 ```
 
 ### Eventos
 
-| Método | Endpoint                        | O que faz                                                              |
-| ------- | ------------------------------- | ---------------------------------------------------------------------- |
-| GET     | `/api/events/`                | Lista eventos publicados e futuros.                                    |
-| POST    | `/api/events/`                | Cria um evento. Precisa estar logado.                                  |
-| GET     | `/api/events/<id>/`           | Mostra detalhes de um evento publicado.                                |
-| PATCH   | `/api/events/<id>/`           | Edita um evento. Apenas o organizador.                                 |
-| DELETE  | `/api/events/<id>/`           | Exclui um evento. Apenas o organizador e sem inscrições confirmadas. |
-| GET     | `/api/events/<id>/vacancies/` | Mostra quantas vagas ainda existem.                                    |
-| GET     | `/api/events/<id>/comments/`  | Lista comentários do evento.                                          |
-| POST    | `/api/events/<id>/comments/`  | Cria comentário. Precisa estar logado.                                |
+Roteados via `DefaultRouter` (`events.urls`), registrados em `EventViewSet`.
 
-Filtros disponíveis na listagem:
+| Método | Endpoint | Autenticação | O que faz |
+| --- | --- | --- | --- |
+| GET | `/api/events/` | pública | Lista **todos** os eventos (qualquer status), paginado. |
+| POST | `/api/events/` | obrigatória | Cria um evento; o usuário logado vira o `organizador`. |
+| GET | `/api/events/<id>/` | pública | Detalhe de um evento. |
+| PUT/PATCH | `/api/events/<id>/` | apenas organizador | Edita o evento. |
+| DELETE | `/api/events/<id>/` | apenas organizador | Exclui o evento. |
+| GET | `/api/events/<id>/vacancies/` | pública | Retorna `vagas_disponiveis`. |
+| POST | `/api/events/<id>/register/` | obrigatória | Inscreve o usuário logado no evento. |
+| DELETE | `/api/events/<id>/cancel/` | obrigatória | Cancela a inscrição do usuário logado. |
+| GET | `/api/events/<id>/comments/` | pública | Lista comentários do evento (não paginado). |
+| POST | `/api/events/<id>/comments/` | obrigatória | Cria um comentário no evento. |
 
-```text
-/api/events/?category=1
-/api/events/?search=python
-```
+Permissões: `IsAuthenticatedOrReadOnly` + `IsOrganizerOrReadOnly` — leitura (`GET`) é sempre pública; qualquer escrita exige login, e editar/excluir exige ser o organizador do evento (verificado objeto a objeto).
 
 Exemplo de criação de evento:
 
 ```json
+POST /api/events/
+Authorization: Bearer <access>
 {
-  "category_id": 1,
-  "title": "Python Day",
-  "description": "Evento sobre Python e Django",
-  "starts_at": "2026-07-20T19:00:00-03:00",
-  "location": "Auditório principal",
-  "max_capacity": 50,
-  "status": "published"
+  "titulo": "Python Day",
+  "descricao": "Evento sobre Python e Django",
+  "data_hora": "2026-07-20T19:00:00-03:00",
+  "local": "Auditório principal",
+  "capacidade_maxima": 50,
+  "categoria": "tech",
+  "status": "publicado"
 }
 ```
 
-### Inscrições
+`categoria` é referenciada pelo **slug** (não pelo id). `status` aceita `rascunho`, `publicado` ou `encerrado` (padrão: `publicado`).
+
+Para enviar `imagem_capa`, use `multipart/form-data` em vez de JSON.
+
+Resposta (exemplo simplificado):
+
+```json
+{
+  "id": 10,
+  "titulo": "Python Day",
+  "descricao": "Evento sobre Python e Django",
+  "data_hora": "2026-07-20T19:00:00-03:00",
+  "local": "Auditório principal",
+  "capacidade_maxima": 50,
+  "imagem_capa": null,
+  "status": "publicado",
+  "criado_em": "2026-07-03T13:00:00-03:00",
+  "organizador": "maria",
+  "categoria": "tech",
+  "inscritos": 0,
+  "ja_inscrito": false,
+  "comentarios": []
+}
+```
 
-| Método | Endpoint                       | O que faz                                 |
-| ------- | ------------------------------ | ----------------------------------------- |
-| POST    | `/api/events/<id>/register/` | Inscreve o usuário logado no evento.     |
-| POST    | `/api/events/<id>/cancel/`   | Cancela a inscrição do usuário logado. |
+Filtros: **não há** filtro por categoria ou busca por texto implementado atualmente na listagem de eventos (`/api/events/`) — a listagem retorna todos os eventos, de qualquer status e data, apenas paginados.
+
+### Inscrições (ações do evento)
+
+| Ação | Endpoint | Regras aplicadas (`events/services.py`) |
+| --- | --- | --- |
+| Inscrever-se | `POST /api/events/<id>/register/` | Se já existir inscrição `confirmada` → erro `inscricao_duplicada`. Se não houver vaga (`vagas_disponiveis <= 0`) → erro `evento_lotado`. Se existir inscrição `cancelada` anterior, ela é reaproveitada e marcada como `confirmada`. Caso contrário, cria uma nova inscrição. |
+| Cancelar inscrição | `DELETE /api/events/<id>/cancel/` | Precisa existir inscrição `confirmada` para esse usuário/evento; caso contrário, erro `inscricao_nao_encontrada`. Ao cancelar, o status vira `cancelada` (o registro não é apagado). |
+
+> Atenção: atualmente **não há** verificação impedindo o organizador de se inscrever no próprio evento, nem validação de evento "publicado" antes de inscrever — qualquer usuário autenticado pode se inscrever em qualquer evento, de qualquer status, desde que haja vaga.
 
-Regras importantes:
+### Minhas inscrições
 
-- O usuário precisa estar logado.
-- O evento precisa estar publicado.
-- O organizador não se inscreve no próprio evento.
-- O mesmo usuário não pode ter duas inscrições confirmadas no mesmo evento.
-- Se não houver vaga, a inscrição é recusada.
+| Método | Endpoint | Autenticação | O que faz |
+| --- | --- | --- | --- |
+| GET | `/api/registrations/me/` | obrigatória | Lista as inscrições do usuário logado (com o evento completo aninhado), paginado. |
+
+Formato de item:
+
+```json
+{
+  "id": 3,
+  "evento": { "...": "objeto completo do evento, igual ao de /api/events/<id>/" },
+  "status": "confirmada",
+  "data_inscricao": "2026-07-03T13:05:00-03:00"
+}
+```
 
-## Classes e funções principais
+### Comentários
 
-### `categories.models.Category`
+| Método | Endpoint | Autenticação | O que faz |
+| --- | --- | --- | --- |
+| GET | `/api/events/<id>/comments/` | pública | Lista comentários do evento, do mais antigo para o mais novo. |
+| POST | `/api/events/<id>/comments/` | obrigatória | Cria comentário (`texto` obrigatório e não vazio). |
 
-Representa uma categoria de evento.
+Exemplo:
 
-Campos principais:
+```json
+POST /api/events/10/comments/
+Authorization: Bearer <access>
+{ "texto": "Muito bom esse evento!" }
+```
 
-- `name`: nome da categoria.
-- `description`: explicação opcional.
-- `is_active`: indica se a categoria aparece na API.
-- `created_at`: data de criação.
+Resposta (`201`):
 
-### `events.models.Event`
+```json
+{ "id": 5, "autor": "maria", "texto": "Muito bom esse evento!", "data": "2026-07-03T13:10:00-03:00" }
+```
 
-Representa um evento criado por um organizador.
+Se `texto` vier vazio ou só com espaços, o backend responde `400` com `{"detail": "O comentario nao pode estar vazio."}`.
 
-Campos principais:
+## Modelos de dados
 
-- `organizer`: usuário que criou o evento.
-- `category`: categoria do evento.
-- `title`: título.
-- `description`: descrição.
-- `starts_at`: data e horário.
-- `location`: local.
-- `max_capacity`: quantidade máxima de pessoas.
-- `cover_image`: URL opcional de imagem.
-- `status`: `draft`, `published` ou `closed`.
+### `categories.Category`
 
-Funções e propriedades:
+| Campo | Tipo | Observações |
+| --- | --- | --- |
+| `nome` | `CharField(60)` | único. |
+| `slug` | `SlugField(60)` | único; usado como identificador em `Event.categoria`. |
 
-- `clean()`: valida se a data é futura e se a capacidade é positiva.
-- `confirmed_registrations_count`: conta inscrições confirmadas.
-- `vacancies`: calcula vagas disponíveis.
-- `has_vacancies`: informa se ainda há vaga.
+### `events.Event`
 
-### `events.models.Comment`
+| Campo | Tipo | Observações |
+| --- | --- | --- |
+| `titulo` | `CharField(140)` | |
+| `descricao` | `TextField` | |
+| `data_hora` | `DateTimeField` | sem validação de data futura no código atual. |
+| `local` | `CharField(200)` | |
+| `capacidade_maxima` | `PositiveIntegerField` | sem validação explícita de mínimo além do tipo do campo. |
+| `imagem_capa` | `ImageField` (opcional) | salva em `media/capas/`. |
+| `status` | `CharField` | `rascunho`, `publicado` (padrão) ou `encerrado` — o valor não altera o comportamento de nenhum endpoint hoje (é apenas informativo). |
+| `criado_em` | `DateTimeField` | preenchido automaticamente. |
+| `organizador` | FK para `User` | `on_delete=CASCADE`. |
+| `categoria` | FK para `Category` | `on_delete=PROTECT` (não é possível apagar uma categoria com eventos vinculados). |
 
-Representa um comentário feito em um evento.
+Propriedades calculadas: `inscritos` (contagem de inscrições `confirmada`) e `vagas_disponiveis` (`capacidade_maxima - inscritos`, nunca negativo).
 
-Campos principais:
+### `events.Comment`
 
-- `user`: autor do comentário.
-- `event`: evento comentado.
-- `content`: texto do comentário.
-- `created_at`: data de criação.
+| Campo | Tipo | Observações |
+| --- | --- | --- |
+| `evento` | FK para `Event` | `on_delete=CASCADE`, `related_name="comentarios"`. |
+| `autor` | FK para `User` | `on_delete=CASCADE`. |
+| `texto` | `TextField` | validado no service (`criar_comentario`) contra texto vazio. |
+| `data` | `DateTimeField` | preenchido automaticamente. |
 
-### `registrations.models.Registration`
+### `registrations.Registration`
 
-Representa a inscrição de um usuário em um evento.
+| Campo | Tipo | Observações |
+| --- | --- | --- |
+| `usuario` | FK para `User` | `on_delete=CASCADE`. |
+| `evento` | FK para `Event` | `on_delete=CASCADE`. |
+| `status` | `CharField` | `confirmada` (padrão) ou `cancelada`. |
+| `data_inscricao` | `DateTimeField` | preenchido automaticamente. |
 
-Campos principais:
+Restrição de banco: `unique_together = ("usuario", "evento")` — só pode existir **um** registro por par usuário/evento (cancelamentos reutilizam a mesma linha em vez de criar uma nova).
 
-- `user`: usuário inscrito.
-- `event`: evento escolhido.
-- `status`: `confirmed` ou `canceled`.
-- `registered_at`: data da inscrição.
-- `updated_at`: última atualização.
+## Regras de negócio (`events/services.py`)
 
-Regra de banco:
+| Função | Responsabilidade |
+| --- | --- |
+| `inscrever_usuario(evento, usuario)` | Cria/reativa a inscrição do usuário no evento, validando duplicidade e vagas. Executa em transação (`@transaction.atomic`). |
+| `cancelar_inscricao(evento, usuario)` | Marca a inscrição confirmada como `cancelada`. Falha se não houver inscrição confirmada. |
+| `listar_comentarios(evento)` | Retorna os comentários do evento (com `select_related("autor")`). |
+| `criar_comentario(evento, autor, texto)` | Valida texto não vazio e cria o comentário. |
 
-- `unique_registration_per_user_event`: impede mais de um registro para o mesmo usuário no mesmo evento.
+## Tratamento de erros
 
-## Services
+### Erros de autenticação (401) — normalizados globalmente
 
-### `events.services.create_event()`
+`config/exceptions.py` define `api_exception_handler`, configurado em `REST_FRAMEWORK.EXCEPTION_HANDLER`. Ele intercepta **qualquer** resposta `401` (token ausente, inválido ou expirado) e a reescreve em um formato único:
 
-Cria um evento e executa as validações do model antes de salvar.
+```json
+{
+  "detail": "Sua sessao expirou ou o token de acesso e invalido. Faca login novamente.",
+  "code": "token_not_valid",
+  "action": "login_required"
+}
+```
 
-### `events.services.update_event()`
+- `code` vem do erro original do SimpleJWT quando disponível (`token_not_valid`, etc.); se não houver código explícito (ex.: nenhum header `Authorization` enviado), cai no valor padrão `"authentication_failed"`.
+- `action: "login_required"` é um sinal para o frontend redirecionar para a tela de login.
 
-Atualiza um evento somente se o usuário for o organizador.
+Esse tratamento **só se aplica a respostas 401**. Outros status (400, 403, 404) mantêm o formato padrão do Django REST Framework.
 
-Também impede reduzir a capacidade para um número menor do que as inscrições confirmadas.
+### Erros de negócio (400) — exceções customizadas
 
-### `events.services.delete_event()`
+Definidas em `events/services.py`, todas como subclasses de `APIException` com `status_code = 400`:
 
-Remove um evento somente se o usuário for o organizador.
+| Exceção | `default_detail` | Quando ocorre |
+| --- | --- | --- |
+| `CapacidadeError` | "Evento lotado." | Tentativa de inscrição sem vagas disponíveis. |
+| `InscricaoDuplicadaError` | "Voce ja esta inscrito." | Tentativa de inscrição já confirmada anteriormente. |
+| `InscricaoNaoEncontradaError` | "Voce nao possui inscricao neste evento." | Tentativa de cancelar sem inscrição confirmada. |
+| `ComentarioVazioError` | "O comentario nao pode estar vazio." | Comentário enviado sem texto (ou só espaços). |
 
-Se já houver inscrição confirmada, o evento não é excluído.
+Essas exceções resultam em respostas no formato padrão do DRF, por exemplo:
 
-### `events.services.published_events()`
+```json
+{ "detail": "Voce ja esta inscrito." }
+```
 
-Retorna apenas eventos publicados e com data futura.
+### Erros de validação de payload (400) — criação/edição de evento
 
-### `events.services.get_published_event()`
+`EventViewSet.create` e `EventViewSet.update` não deixam o DRF gerar a resposta padrão de validação; eles capturam `serializer.errors` manualmente, logam um `logger.warning` e retornam:
 
-Busca um evento publicado pelo `id`.
+```json
+{
+  "detail": "Nao foi possivel criar o evento.",
+  "errors": {
+    "categoria": ["Object with slug=inexistente does not exist."]
+  }
+}
+```
 
-Se não encontrar, retorna erro 404.
+(o mesmo formato vale para update, trocando a mensagem para "Nao foi possivel atualizar o evento.")
 
-### `events.services.create_comment()`
+### Outros erros padrão do DRF (não customizados)
 
-Cria comentário em um evento publicado.
+- **403** ao tentar editar/excluir evento de outro organizador — mensagem padrão do DRF de permissão negada.
+- **404** ao acessar `/api/events/<id>/...` com id inexistente — mensagem padrão `{"detail": "Not found."}`.
+- **400** de `django.core.exceptions.ObjectDoesNotExist` no relacionamento `categoria` (slug inexistente) durante criação/edição — capturado como erro de validação do serializer (ver acima).
 
-### `events.services.close_past_events()`
+## Paginação
 
-Marca eventos antigos como encerrados.
+`DEFAULT_PAGINATION_CLASS = PageNumberPagination`, `PAGE_SIZE = 10`. Afeta:
 
-Essa função pode ser usada futuramente em uma rotina automática.
+- `GET /api/events/` (listagem do `EventViewSet`)
+- `GET /api/categories/`
+- `GET /api/registrations/me/`
 
-### `registrations.services.register_user_for_event()`
+Formato de resposta paginada:
 
-Inscreve o usuário em um evento.
+```json
+{
+  "count": 23,
+  "next": "http://127.0.0.1:8000/api/events/?page=2",
+  "previous": null,
+  "results": [ "..." ]
+}
+```
 
-Ela verifica publicação, vagas, duplicidade e impede o organizador de se inscrever no próprio evento.
+`GET /api/events/<id>/comments/` **não** é paginado (é uma `@action` que devolve a lista completa).
 
-### `registrations.services.cancel_registration()`
+## CORS
 
-Cancela uma inscrição confirmada.
+Somente `http://localhost:5173` (padrão do Vite) está liberado em `CORS_ALLOWED_ORIGINS`, com `CORS_ALLOW_CREDENTIALS = True`. Para rodar o frontend em outra porta/host, adicione a origem em `config/settings.py`.
 
-## Views principais
+## Painel administrativo
 
-### `accounts.views.RegisterView`
-
-Recebe dados de cadastro e cria um usuário.
-
-### `accounts.views.LoginView`
-
-Recebe usuário e senha, autentica e cria uma sessão.
-
-### `accounts.views.LogoutView`
-
-Encerra a sessão atual.
-
-### `accounts.views.MeView`
-
-Mostra os dados básicos do usuário logado.
-
-### `categories.views.CategoryListCreateView`
-
-Lista categorias ativas e cria categorias quando o usuário é administrador.
-
-### `categories.views.CategoryDetailView`
-
-Mostra, altera ou desativa uma categoria específica.
-
-### `events.views.EventListCreateView`
-
-Lista eventos publicados e cria novos eventos.
-
-### `events.views.EventDetailView`
-
-Mostra detalhes, altera ou exclui um evento.
-
-### `events.views.EventRegistrationView`
-
-Chama o service que realiza inscrição no evento.
-
-### `events.views.EventRegistrationCancelView`
-
-Chama o service que cancela inscrição.
-
-### `events.views.EventVacanciesView`
-
-Retorna o número de vagas disponíveis.
-
-### `events.views.EventCommentsView`
-
-Lista e cria comentários.
-
-## Funções auxiliares
-
-### `config.api.json_body()`
-
-Transforma o corpo JSON da requisição em um dicionário Python.
-
-### `config.api.error_response()`
-
-Transforma erros comuns em respostas JSON legíveis.
-
-### `config.api.parse_required_datetime()`
-
-Converte texto de data/hora para um objeto que o Django entende.
-
-### `config.api.JsonLoginRequiredMixin`
-
-Classe auxiliar para bloquear endpoints que exigem usuário logado.
+`/admin/` expõe `Category`, `Event`, `Comment` e `Registration` (registrados via `admin.site.register` simples, sem customização de `ModelAdmin`). É o único lugar para criar/editar/remover categorias hoje, já que a API só oferece leitura.
 
 ## Testes
 
-Os testes cobrem:
+O projeto **não possui testes automatizados no momento** — não há nenhum arquivo `tests.py` em nenhum app. Antes de alterações relevantes, recomenda-se testar manualmente os fluxos (registro, login, criação de evento, inscrição, cancelamento, comentário) via `curl`/Postman/Insomnia.
 
-- criação de usuário;
-- endpoint protegido por login;
-- listagem de categorias;
-- bloqueio de criação de categoria por usuário comum;
-- criação de evento;
-- recusa de evento com data passada;
-- permissão de edição apenas para o organizador;
-- listagem de eventos publicados;
-- inscrição em evento;
-- bloqueio de inscrição duplicada;
-- bloqueio quando não há vagas;
-- endpoint de inscrição exigindo login.
+## Pontos de atenção conhecidos
 
-Comando:
+Levantados durante a leitura do código atual, úteis para próximos ajustes:
 
-```bash
-python manage.py test
-```
-
-Resultado esperado:
-
-```text
-Ran 13 tests
-OK
-```
+- `data_hora` de um evento não é validada contra o passado — é possível criar eventos com data já vencida.
+- `capacidade_maxima` não tem validação de negócio além do tipo (`PositiveIntegerField`), e reduzir a capacidade abaixo do número de inscritos confirmados não é bloqueado na atualização do evento.
+- `DELETE /api/events/<id>/` não verifica se existem inscrições confirmadas antes de excluir o evento.
+- `POST /api/events/<id>/register/` não impede o organizador de se inscrever no próprio evento, nem exige que o evento esteja com `status = "publicado"`.
+- `GET /api/events/` lista eventos de qualquer status (inclusive `rascunho` e `encerrado`), sem filtro de data ou de categoria/busca por texto.
+- Não há endpoint de logout/blacklist de token — o app `rest_framework_simplejwt.token_blacklist` não está instalado.
+- `SECRET_KEY` tem um valor padrão embutido no código, usado apenas quando `DJANGO_SECRET_KEY` não está definida no ambiente — não usar esse padrão fora de desenvolvimento local.
